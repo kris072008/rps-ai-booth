@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rock Paper Scissors vs AI — IET PSBA</title>
+<style>
+  :root{
+    --navy:#1a2a4e; --navy-2:#101a30; --accent:#ffbe3c;
+    --win:#82dc8c; --lose:#f06b6b; --tie:#c8c8c8; --text:#f2f5fb;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--navy-2); color:var(--text); min-height:100dvh;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column; align-items:center;
+  }
+  header{
+    width:100%; background:var(--navy); border-bottom:3px solid var(--accent);
+    padding:14px 16px; text-align:center;
+  }
+  header h1{font-size:1rem; letter-spacing:.04em}
+  header p{font-size:.78rem; color:var(--accent); margin-top:2px}
+  .stage{
+    position:relative; width:100%; max-width:720px; aspect-ratio:4/3;
+    background:#000; overflow:hidden; margin-top:10px; border-radius:10px;
+  }
+  video,canvas{position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    transform:scaleX(-1)}
+  .overlay{
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; text-align:center;
+    text-shadow:0 2px 10px rgba(0,0,0,.85); pointer-events:none; padding:16px;
+  }
+  .big{font-size:clamp(2.2rem,11vw,4.4rem); font-weight:800; letter-spacing:.02em}
+  .mid{font-size:clamp(1rem,4.5vw,1.6rem); font-weight:600; margin-top:6px}
+  .score{
+    width:100%; max-width:720px; display:flex; justify-content:space-around;
+    background:var(--navy); border-radius:10px; padding:12px; margin-top:10px;
+  }
+  .score div{text-align:center}
+  .score b{display:block; font-size:1.7rem}
+  .score span{font-size:.72rem; color:#9fb0cc; letter-spacing:.08em}
+  footer{
+    max-width:720px; padding:14px 18px 28px; text-align:center;
+    font-size:.82rem; color:#9fb0cc; line-height:1.5;
+  }
+  button{
+    font:inherit; background:var(--accent); color:#1a2a4e; border:0;
+    border-radius:999px; padding:12px 26px; font-weight:700; margin-top:14px;
+    cursor:pointer;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>IET PSB Academy On Campus</h1>
+  <p>Campus Club Fair 2026 · Beat the AI</p>
+</header>
+
+<div class="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <canvas id="draw"></canvas>
+  <div class="overlay">
+    <div class="big" id="big"></div>
+    <div class="mid" id="mid">Tap start, then show your hand</div>
+  </div>
+</div>
+
+<div class="score">
+  <div><b id="aiScore">0</b><span>AI</span></div>
+  <div><b id="roundCount">0</b><span>ROUNDS</span></div>
+  <div><b id="humanScore">0</b><span>HUMANS</span></div>
+</div>
+
+<button id="start">Start camera</button>
+
+<footer>
+  Rock = fist &nbsp;·&nbsp; Paper = open palm &nbsp;·&nbsp; Scissors = two fingers<br>
+  The AI learns your patterns as you play — it is not guessing randomly.
+</footer>
+
+<script type="module">
+import { FilesetResolver, HandLandmarker }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const MOVES = ["rock","paper","scissors"];
+const BEATS = {rock:"scissors", paper:"rock", scissors:"paper"};
+const COUNTER = {rock:"paper", paper:"scissors", scissors:"rock"};
+
+/* ---- The AI: order-2 Markov model over the player's move history ---- */
+class PatternAI {
+  constructor(epsilon = 0.12){ this.eps = epsilon; this.hist = []; this.t = [new Map(),new Map(),new Map()]; this.why = "warming up"; }
+  #key(o){ return this.hist.slice(this.hist.length - o).join("|"); }
+  predict(){
+    if (Math.random() < this.eps){ this.why = "mixing it up"; return MOVES[Math.floor(Math.random()*3)]; }
+    for (const o of [2,1,0]){
+      if (this.hist.length < o) continue;
+      const c = this.t[o].get(this.#key(o));
+      if (!c) continue;
+      const total = [...c.values()].reduce((a,b)=>a+b,0);
+      if (total < (o ? 2 : 3)) continue;
+      const guess = [...c.entries()].sort((a,b)=>b[1]-a[1])[0][0];
+      this.why = `you often play ${guess} here`;
+      return COUNTER[guess];
+    }
+    this.why = "warming up";
+    return MOVES[Math.floor(Math.random()*3)];
+  }
+  observe(m){
+    for (const o of [0,1,2]){
+      if (this.hist.length < o) continue;
+      const k = this.#key(o);
+      if (!this.t[o].has(k)) this.t[o].set(k, new Map());
+      const c = this.t[o].get(k);
+      c.set(m, (c.get(m)||0)+1);
+    }
+    this.hist.push(m);
+  }
+}
+
+/* ---- Gesture classification from 21 hand landmarks ---- */
+const TIPS=[8,12,16,20], PIPS=[6,10,14,18];
+function classify(lm){
+  const span = Math.hypot(lm[0].x-lm[9].x, lm[0].y-lm[9].y) || 1e-6;
+  const margin = span * 0.15;
+  const ext = TIPS.map((t,i)=> (lm[PIPS[i]].y - lm[t].y) > margin);
+  const n = ext.filter(Boolean).length;
+  const [idx, mid, ring, pinky] = ext;
+  if (n === 0) return "rock";
+  if (idx && mid && !ring && !pinky) return "scissors";
+  if (n >= 3) return "paper";
+  return null;
+}
+const outcome = (h,a) => h === a ? "tie" : (BEATS[h] === a ? "human" : "ai");
+
+/* ---- Game loop ---- */
+const video = document.getElementById("cam");
+const canvas = document.getElementById("draw");
+const ctx = canvas.getContext("2d");
+const bigEl = document.getElementById("big"), midEl = document.getElementById("mid");
+const aiEl = document.getElementById("aiScore"), humanEl = document.getElementById("humanScore"),
+      roundEl = document.getElementById("roundCount");
+
+const ai = new PatternAI();
+let aiScore=0, humanScore=0, rounds=0;
+let state="waiting", t0=0, stable=[], landmarker=null;
+let lockedHuman=null, lockedAI=null, result=null, why="";
+
+document.getElementById("start").addEventListener("click", async (e) => {
+  e.target.disabled = true; e.target.textContent = "Loading…";
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  landmarker = await HandLandmarker.createFromOptions(fileset, {
+    baseOptions:{ modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task" },
+    numHands:1, runningMode:"VIDEO"
+  });
+  const stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:"user" } });
+  video.srcObject = stream;
+  await video.play();
+  e.target.remove();
+  requestAnimationFrame(loop);
+});
+
+function loop(ts){
+  if (video.readyState >= 2){
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    const res = landmarker.detectForVideo(video, ts);
+    let move = null;
+    if (res.landmarks?.length){
+      const lm = res.landmarks[0];
+      move = classify(lm);
+      ctx.fillStyle = "#ffbe3c";
+      for (const p of lm){ ctx.beginPath(); ctx.arc(p.x*canvas.width, p.y*canvas.height, 5, 0, 7); ctx.fill(); }
+    }
+    tick(move, performance.now()/1000);
+  }
+  requestAnimationFrame(loop);
+}
+
+function tick(move, now){
+  if (state === "waiting"){
+    stable.push(move);
+    if (stable.length > 6) stable.shift();
+    if (stable.length === 6 && stable[0] !== null && stable.every(m => m === stable[0])){
+      state = "counting"; t0 = now; stable = [];
+    }
+    bigEl.textContent = "";
+    bigEl.style.color = "";
+    midEl.textContent = "Show your hand to start";
+  }
+  else if (state === "counting"){
+    const words = ["ROCK…","PAPER…","SCISSORS…","SHOOT!"];
+    const el = now - t0;
+    bigEl.style.color = "var(--accent)";
+    bigEl.textContent = words[Math.min(Math.floor(el/0.6), 3)];
+    midEl.textContent = "Lock in your throw";
+    if (el >= 2.6){
+      if (!move){ state = "waiting"; return; }
+      lockedHuman = move; lockedAI = ai.predict(); why = ai.why;
+      result = outcome(lockedHuman, lockedAI);
+      ai.observe(lockedHuman);
+      rounds++;
+      if (result === "ai") aiScore++; else if (result === "human") humanScore++;
+      aiEl.textContent = aiScore; humanEl.textContent = humanScore; roundEl.textContent = rounds;
+      state = "reveal"; t0 = now;
+    }
+  }
+  else if (state === "reveal"){
+    const map = { human:["YOU WIN!","var(--win)"], ai:["AI WINS","var(--lose)"], tie:["DRAW","var(--tie)"] };
+    bigEl.textContent = map[result][0];
+    bigEl.style.color = map[result][1];
+    midEl.textContent = `You: ${lockedHuman.toUpperCase()} · AI: ${lockedAI.toUpperCase()} — AI thought: ${why}`;
+    if (now - t0 > 2.8){ state = "waiting"; stable = []; }
+  }
+}
+</script>
+</body>
+</html>
