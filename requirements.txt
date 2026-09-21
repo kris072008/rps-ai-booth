@@ -1,3 +1,5 @@
+# Python 3.9 to 3.12 (mediapipe does not support 3.13 yet)
+# Works on macOS and on 64-bit Raspberry Pi OS (aarch64 wheels exist for all three)
 mediapipe==0.10.14
 numpy<2
 opencv-python==4.10.0.84
